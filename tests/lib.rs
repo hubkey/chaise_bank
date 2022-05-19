@@ -1,4 +1,5 @@
 use radix_engine::transaction::TransactionExecutor;
+use radix_engine::model::{SignedTransaction, Receipt};
 use scrypto::crypto::{EcdsaPrivateKey, EcdsaPublicKey};
 use radix_engine::ledger::*;
 use radix_engine::transaction::*;
@@ -16,67 +17,72 @@ impl From<(EcdsaPublicKey, EcdsaPrivateKey, ComponentAddress)> for Account {
     }
 }
 
-struct TestEnv<'a, L: SubstateStore> {
-    executor: TransactionExecutor<'a, L>,
-    bank: ComponentAddress,
-    owner: Account,
-    customer: Account,
-}
-
-fn set_up_test_env<'a, L: SubstateStore>(ledger: &'a mut L) -> TestEnv<'a, L> {
-    let mut executor = TransactionExecutor::new(ledger, false);
-    let owner: Account = executor.new_account().into();
-    let customer: Account = executor.new_account().into();
-    let package = executor.publish_package(compile_package!()).unwrap();
-    
-    let receipt = executor
-        .validate_and_execute(
-            &TransactionBuilder::new()
-                .call_function(
-                    package,
-                    "Bank",
-                    "new",
-                    //TODO: need to build transaction to include bucket with inital funding
-                    args![]
-                )
-                .call_method_with_all_resources(owner.account, "deposit_batch")
-                .build(executor.get_nonce([owner.public_key]))
-                .sign([&owner.private_key]),
-        )
-        .unwrap();
-    let bank = receipt.new_component_addresses[0];
-
-    TestEnv {
-        executor,
-        bank,
-        owner,
-        customer,
+impl Clone for Account {
+    fn clone(&self) -> Self {
+        Account {
+            public_key: self.public_key,
+            private_key: EcdsaPrivateKey::from_bytes(&self.private_key.to_bytes()).unwrap(),
+            account: self.account,
+        }
     }
 }
 
-fn register_customer<'a, L: SubstateStore>(env: &mut TestEnv<'a, L>) -> (Bucket, ResourceAddress) {
-    let mut receipt = env
-        .executor
-        .validate_and_execute(
-            &TransactionBuilder::new()
-                .call_method(env.bank, "customer_registration", args!["Satoshi", "Nakamoto"])
-                .call_method_with_all_resources(env.customer.account, "deposit_batch")
-                .build(env.executor.get_nonce([env.customer.public_key]))
-                .sign([&env.customer.private_key]),
-        )
-        .unwrap();
-    assert!(receipt.result.is_ok());
-    let encoded = receipt.outputs.swap_remove(0).raw;
-    scrypto_decode(&encoded).unwrap()
+struct TestEnv<'a, L: SubstateStore> {
+    executor: TransactionExecutor<'a, L>,
+    bank: ComponentAddress,
+    customer: Account,
 }
 
+impl<'a, L: SubstateStore> TestEnv<'a, L> {
+
+    fn new(ledger: &'a mut L) -> Self {
+        let mut executor = TransactionExecutor::new(ledger, false);
+        let owner: Account = executor.new_account().into();
+        let customer: Account = executor.new_account().into();
+        let package = executor.publish_package(compile_package!()).unwrap();
+        
+        let new_bank_transaction = TransactionBuilder::new()
+            .withdraw_from_account_by_amount(dec!("1000"), RADIX_TOKEN, owner.account)
+            .take_from_worktop(RADIX_TOKEN, |builder, bucket_id| {
+                builder.call_function(package, "Bank", "new", args![scrypto::resource::Bucket(bucket_id)])
+            })
+            .call_method_with_all_resources(owner.account, "deposit_batch")
+            .build(executor.get_nonce([owner.public_key]))
+            .sign([&owner.private_key]);
+    
+        let bank = executor
+            .validate_and_execute(&new_bank_transaction).unwrap()
+            .new_component_addresses[0];
+    
+        TestEnv {
+            executor,
+            bank,
+            customer,
+        }
+    }
+
+    fn execute_transaction(&mut self, transaction: &'a SignedTransaction) -> Receipt {
+        self.executor.validate_and_execute(transaction).unwrap()
+    }
+
+    fn signed_transaction(&mut self, builder: &mut TransactionBuilder, account: Account) -> SignedTransaction {
+        builder.call_method_with_all_resources(account.account, "deposit_batch")
+            .build(self.executor.get_nonce([account.public_key]))
+            .sign([&account.private_key])
+    }
+}
 
 #[test]
-fn should_register_customer() {
-    //NOTE Will fail - see TODO in set_up_test_env above
+fn customer_registration_receipt_is_ok() {
     let mut ledger = InMemorySubstateStore::with_bootstrap();
-    let mut env = set_up_test_env(&mut ledger);
-    println!("{:?}", env.bank);
+    let mut env = TestEnv::new(&mut ledger);
+    
+    let transaction = env.signed_transaction(TransactionBuilder::new().call_method(
+        env.bank.clone(), "customer_registration", args!["Satoshi", "Nakamoto"]), env.customer.clone());
 
-    let (_, _) = register_customer(&mut env);
+    let receipt = env.execute_transaction(&transaction);
+
+    let (_bucket, _resource_address) = scrypto_decode::<(Bucket, ResourceAddress)>(&receipt.outputs[0].raw).unwrap();
+    
+    assert!(receipt.result.is_ok());
 }
