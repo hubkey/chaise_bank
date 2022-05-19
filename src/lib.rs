@@ -86,7 +86,8 @@ blueprint! {
                 Some(customer) => {
                     assert!(amount <= funds.amount(), "Insufficient funds");
                     assert!(amount > dec!("0"), "Amount must be greater than zero");
-                    
+                    assert!(customer.known_since != None, "Unknown customer");
+
                     customer.account = customer.account.credit(amount);
                     self.vault.put(funds.take(amount));
 
@@ -105,7 +106,8 @@ blueprint! {
                 Some(customer) => {
                     assert!(amount <= self.vault.amount(), "Insufficient funds");
                     assert!(amount > dec!("0"), "Amount must be greater than zero");
-                    
+                    assert!(customer.known_since != None, "Unknown customer");
+
                     customer.account = customer.account.debit(amount);
                     
                     info!("{:?}", customer);
